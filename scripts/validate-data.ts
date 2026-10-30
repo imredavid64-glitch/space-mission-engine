@@ -1,0 +1,242 @@
+/* eslint-disable no-console */
+/**
+ * Data integrity gate — "GitHub is the database", so every dataset must pass
+ * structural checks before the app builds. Run: npm run validate:data
+ *
+ * Failures exit non-zero so CI / pre-push hooks can enforce schema-as-contract.
+ */
+
+interface Body {
+  id: string;
+  name: string;
+  type: string;
+  radiusKm: number;
+  massKg: number;
+  gravityMs2: number;
+  muKm3s2: number;
+  distanceFromSunAU: number | null;
+  orbitalPeriodDays: number | null;
+  rotationHours: number;
+  axialTiltDeg: number;
+  escapeVelocityKmS: number;
+  temperatureK: number;
+  color: string;
+  description: string;
+  funFacts: string[];
+  source: string;
+}
+
+interface LaunchVehicle {
+  id: string;
+  name: string;
+  operator: string;
+  heightM: number;
+  massKg: number;
+  payloadLEOKg: number;
+  payloadTLIKg?: number;
+  payloadGTOKg?: number;
+  stages: number;
+  ispSeaLevelS: number;
+  ispVacuumS: number;
+  firstFlight: string;
+  engine: string;
+  description: string;
+  source: string;
+  costPerLaunchUsd: number;
+  costConfidence: "documented" | "estimate";
+  costNote: string;
+}
+
+interface Persona {
+  id: string;
+  name: string;
+  icon: string;
+  tagline: string;
+  signals: string[];
+  action: string;
+  description: string;
+}
+
+interface Crop {
+  id: string;
+  name: string;
+  photoperiod: string;
+  criticalDayLengthHours: { min: number | null; max: number | null };
+  daysToMaturity: { min: number; max: number };
+  notes: string;
+  sourceNote: string;
+}
+
+interface MeteorShower {
+  id: string;
+  name: string;
+  peakMonth: number;
+  dateRange: [string, string];
+  zhPerHour: number;
+  parentBody: string;
+  notes: string;
+}
+
+interface Scenario {
+  id: string;
+  title: string;
+  lane: string;
+  difficulty: string;
+  brief: string;
+  destination: string;
+  constraints: {
+    allowedVehicleIds: string[];
+    crew: { min: number; max: number };
+    surfaceDays: { min: number; max: number };
+    maxRadiationMsv?: number;
+    maxTotalDays?: number;
+  };
+  objectives: { id: string; label: string; require?: string }[];
+  parScore: number;
+}
+
+import fs from "node:fs";
+import path from "node:path";
+
+import bodies from "../src/data/bodies.json";
+import constants from "../src/data/constants.json";
+import launchVehicles from "../src/data/launch-vehicles.json";
+import personas from "../src/data/personas.json";
+import crops from "../src/data/crops.json";
+import meteorShowers from "../src/data/meteor-showers.json";
+import scenariosFile from "../src/data/scenarios.json";
+import articles from "../src/data/articles.json";
+
+let failures = 0;
+function check(label: string, pass: boolean, detail = "") {
+  if (!pass) {
+    failures++;
+    console.error(`  FAIL  ${label}${detail ? ` — ${detail}` : ""}`);
+  } else {
+    console.log(`  ok    ${label}`);
+  }
+}
+function isNum(v: unknown): v is number {
+  return typeof v === "number" && Number.isFinite(v);
+}
+
+console.log("NASAMAP data validation\n");
+
+console.log("constants.json");
+check("mu.sun defined & positive", isNum(constants.mu.sun) && constants.mu.sun > 0);
+check("speed of light ≈ 299792.458", Math.abs(constants.speedOfLightKmPerSec - 299792.458) < 1e-6);
+check("g0 = 9.80665", Math.abs(constants.g0 - 9.80665) < 1e-9);
+
+console.log("bodies.json");
+const bodyIds = new Set<string>();
+for (const b of bodies as Body[]) {
+  const label = `[${b.id}] ${b.name}`;
+  check(`${label} unique id`, !bodyIds.has(b.id));
+  bodyIds.add(b.id);
+  check(`${label} radiusKm>0`, isNum(b.radiusKm) && b.radiusKm > 0);
+  check(`${label} massKg>0`, isNum(b.massKg) && b.massKg > 0);
+  check(`${label} muKm3s2>0`, isNum(b.muKm3s2) && b.muKm3s2 > 0);
+  check(`${label} escape velocity consistent (±5%) with 2μ/r`,
+    Math.abs(Math.sqrt((2 * b.muKm3s2) / b.radiusKm) - b.escapeVelocityKmS) / b.escapeVelocityKmS < 0.05);
+  check(`${label} tilt in [-180,180]`, Math.abs(b.axialTiltDeg) <= 180);
+  check(`${label} source cited`, typeof b.source === "string" && b.source.length > 0);
+}
+
+console.log("launch-vehicles.json");
+const lvIds = new Set<string>();
+for (const l of launchVehicles as LaunchVehicle[]) {
+  check(`[${l.id}] unique id`, !lvIds.has(l.id));
+  lvIds.add(l.id);
+  check(`[${l.id}] payloadLEOKg>0`, isNum(l.payloadLEOKg) && l.payloadLEOKg > 0);
+  check(`[${l.id}] isp vacuum > isp sea-level`, l.ispVacuumS > l.ispSeaLevelS);
+  check(`[${l.id}] stages 1..5`, l.stages >= 1 && l.stages <= 5);
+  check(`[${l.id}] date parseable`, !Number.isNaN(Date.parse(l.firstFlight)));
+  check(
+    `[${l.id}] costPerLaunchUsd>0`,
+    isNum(l.costPerLaunchUsd) && l.costPerLaunchUsd > 0,
+  );
+  check(
+    `[${l.id}] costConfidence enum`,
+    l.costConfidence === "documented" || l.costConfidence === "estimate",
+  );
+  check(`[${l.id}] costNote cited`, typeof l.costNote === "string" && l.costNote.length > 0);
+}
+
+console.log("personas.json");
+const knownSignals = new Set([
+  "dayLength", "sunPath", "frostWindow", "gnssRisk", "moonPhase", "tides", "solunar",
+  "temperature", "insolation", "solarActivity", "hfPropagation", "aurora", "issPass",
+  "meteorShowers", "planetEvents",
+]);
+const personaIds = new Set<string>();
+for (const p of personas as Persona[]) {
+  check(`[${p.id}] unique id`, !personaIds.has(p.id));
+  personaIds.add(p.id);
+  check(`[${p.id}] at least 1 signal`, p.signals.length > 0);
+  for (const s of p.signals) {
+    check(`[${p.id}] signal "${s}" known`, knownSignals.has(s));
+  }
+}
+
+console.log("crops.json");
+const cropIds = new Set<string>();
+const photoperiods = new Set(["short-day", "long-day", "day-neutral", "day-neutral"]);
+for (const c of crops as Crop[]) {
+  check(`[${c.id}] unique id`, !cropIds.has(c.id));
+  cropIds.add(c.id);
+  check(`[${c.id}] photoperiod valid`, photoperiods.has(c.photoperiod));
+  const lo = c.criticalDayLengthHours.min;
+  const hi = c.criticalDayLengthHours.max;
+  if (lo !== null) check(`[${c.id}] photoperiod min sane`, lo >= 8 && lo <= 20);
+  if (hi !== null) check(`[${c.id}] photoperiod max sane`, hi >= 8 && hi <= 20);
+  check(`[${c.id}] maturity min<=max`, c.daysToMaturity.min <= c.daysToMaturity.max);
+}
+
+console.log("meteor-showers.json");
+const showerIds = new Set<string>();
+for (const m of meteorShowers as MeteorShower[]) {
+  check(`[${m.id}] unique id`, !showerIds.has(m.id));
+  showerIds.add(m.id);
+  check(`[${m.id}] peakMonth 1..12`, m.peakMonth >= 1 && m.peakMonth <= 12);
+  check(`[${m.id}] ZHR sanity`, isNum(m.zhPerHour) && m.zhPerHour > 0 && m.zhPerHour < 1000);
+  check(`[${m.id}] dates ISO + ordered`, !Number.isNaN(Date.parse(m.dateRange[0])) && m.dateRange[0] <= m.dateRange[1]);
+}
+
+console.log("scenarios.json");
+const scenarioIds = new Set<string>();
+const objectiveIds = new Set(["lift-stack", "radiation", "eclss-loop", "comms", "transfer", "surface", "duration", "budget"]);
+const allowedDiff = new Set(["Beginner/Youth", "Intermediate", "Advanced"]);
+const allowedDest = new Set(["moon", "mars"]);
+for (const s of (scenariosFile as { version: number; scenarios: Scenario[] }).scenarios) {
+  check(`[${s.id}] unique id`, !scenarioIds.has(s.id));
+  scenarioIds.add(s.id);
+  check(`[${s.id}] title + brief present`, s.title.length > 0 && s.brief.length > 0);
+  check(`[${s.id}] destination valid`, allowedDest.has(s.destination));
+  check(`[${s.id}] difficulty valid`, allowedDiff.has(s.difficulty));
+  check(`[${s.id}] parScore 0..100`, isNum(s.parScore) && s.parScore >= 0 && s.parScore <= 100);
+  const c = s.constraints;
+  check(`[${s.id}] allowed vehicles exist`, c.allowedVehicleIds.length > 0 && c.allowedVehicleIds.every((v) => lvIds.has(v)));
+  check(`[${s.id}] crew range sane`, isNum(c.crew.min) && isNum(c.crew.max) && c.crew.min <= c.crew.max);
+  check(`[${s.id}] surface range sane`, isNum(c.surfaceDays.min) && isNum(c.surfaceDays.max) && c.surfaceDays.min <= c.surfaceDays.max);
+  check(`[${s.id}] objectives present`, s.objectives.length > 0);
+  for (const o of s.objectives) {
+    check(`[${s.id}] objective "${o.id}" known`, objectiveIds.has(o.id));
+  }
+}
+
+console.log("articles.json");
+const articleSlugs = new Set<string>();
+for (const a of articles as { slug: string; title: string; category: string; tags: string[]; body: string; date: string; readTimeMin: number }[]) {
+  check(`[${a.slug}] unique slug`, !articleSlugs.has(a.slug));
+  articleSlugs.add(a.slug);
+  check(`[${a.slug}] title + excerpt`, a.title.length > 0 && Boolean((a as { excerpt?: string }).excerpt?.length));
+  check(`[${a.slug}] body has content`, a.body.length > 200);
+  check(`[${a.slug}] date ISO + sane`, !Number.isNaN(Date.parse(a.date)) && a.body.length > 0);
+  check(`[${a.slug}] readTime>=1`, isNum(a.readTimeMin) && a.readTimeMin >= 1);
+  check(`[${a.slug}] tags non-empty`, Array.isArray(a.tags) && a.tags.length > 0);
+}
+
+console.log(`\n${failures === 0 ? "✓ ALL DATASETS VALID" : `✗ ${failures} FAILURE(S)`}`);
+process.exit(failures === 0 ? 0 : 1);
+
+export { constants };
